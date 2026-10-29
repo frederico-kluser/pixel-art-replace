@@ -11,6 +11,7 @@ venv/
 
 # trabalho do studio (resultados gerados)
 trabalho*/
+recorte*/
 recortes*/
 studio.json
 sprite-*-novo.png

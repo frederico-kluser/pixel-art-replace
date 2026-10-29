@@ -29,6 +29,15 @@ RAIZ = Path(__file__).resolve().parent.parent
 DIST = RAIZ / "web" / "dist"                          # interface React (npm run build em web/)
 
 
+def _encaixar_png(png: bytes, original: np.ndarray, fundo: tuple[int, int, int]) -> bytes:
+    """Geração → encaixe na bbox original (drift de escala do modelo) → PNG."""
+    import io
+    ajustada = imagem.encaixar(Image.open(io.BytesIO(png)), original, fundo)
+    buf = io.BytesIO()
+    ajustada.save(buf, "PNG")
+    return buf.getvalue()
+
+
 # ── prompts ───────────────────────────────────────────────────────────────────
 
 def prompt_replace(estado: dict, mudanca: str, consideracoes: list[str], imagens: int,
@@ -42,7 +51,11 @@ def prompt_replace(estado: dict, mudanca: str, consideracoes: list[str], imagens
             + f"\nLOCK (must not change): the sprite grid is {w}x{h} art-pixels; keep the EXACT grid, "
               "the same pose and silhouette, the same aspect ratio, flat solid colors only "
               "(no anti-aliasing, no gradients), and the same flat background color as the input "
-              "(background = transparency).\n"
+              "(background = transparency). The background MUST stay EXACTLY that flat color: "
+              "no gradient, no texture, no dither, no checkerboard, no vignette. Keep the figure at the "
+              "EXACT same size and position within the frame as the input — do not enlarge, shrink or shift it. "
+              "Keep HARD crisp edges between colors (no soft shading) and keep small face details readable: "
+              "eyes and eyebrows as clear distinct pixels, exactly like the original sprite has.\n"
             f"\nCHANGE: {mudanca or 'Redraw the character with a completely new outfit and look.'}\n")
     if consideracoes:
         base += ("\nIMPORTANT corrections from the user's rejected attempts — fix exactly these:\n"
@@ -74,35 +87,11 @@ class Studio:
         caminho = self.out_dir / "studio.json"
         if caminho.exists():
             self.estado = read_json(caminho)
-        elif self.entrada is None:
+        else:
             self.estado = novo_estado_vazio(self.out_dir, model, mudanca)
             self.salvar()
-            self.sprites: list[np.ndarray] = []
-        else:
-            png = self.entrada.read_bytes()
-            an = analise.analisar(png, com_ia=not sem_ia)
-            arr, _ = analise.carregar(png)
-            sprites = analise.recortar(arr, an.celulas)
-            (self.out_dir / "entrada.png").write_bytes(png)
-            self.sprites: list[np.ndarray] = []
-            for i, s in enumerate(sprites):
-                nome = f"sprite-{i:02d}.png"
-                Image.fromarray(s).save(self.out_dir / nome)
-                self.sprites.append(s)
-            cores, fundo = imagem.paleta_da_sprite(sprites[0] if sprites else arr)
-            self.estado = {
-                "versao": 1, "entrada": self.entrada.name, "model": model, "mudanca": mudanca,
-                "analise": an.resumo(), "fase": "analise", "selecionadas": [0] if sprites else [],
-                "consideracoes": [], "historico": [], "aprovado": None,
-                "sprites": [{"id": i, "arquivo": f"sprite-{i:02d}.png", "tamanho": [int(s.shape[1]), int(s.shape[0])]}
-                            for i, s in enumerate(sprites)],
-                "resultados": [],
-                "paleta": [f"#{c[0]:02X}{c[1]:02X}{c[2]:02X}" for c in cores],
-                "fundo": f"#{fundo[0]:02X}{fundo[1]:02X}{fundo[2]:02X}",
-                "largura_sprite": int(sprites[0].shape[1]) if sprites else 1,
-                "altura_sprite": int(sprites[0].shape[0]) if sprites else 1,
-            }
-            self.salvar()
+            if self.entrada is not None:
+                self.reanalisar(self.entrada.read_bytes())   # fonte única: análise + seleção + rects
         # reconstrói as sprites em memória a partir dos PNGs (quando existem)
         self.sprites = [np.asarray(Image.open(self.out_dir / s["arquivo"]).convert("RGB"))
                         for s in self.estado.get("sprites", [])]
@@ -116,8 +105,12 @@ class Studio:
         cores, fundo = imagem.paleta_da_sprite(sprites[0] if sprites else arr)
         with self.lock:
             self.sprites = sprites
+            fundo_arr = np.array(an.fundo, np.uint8)
+            com_conteudo = [i for i, s in enumerate(sprites) if bool(np.any(np.any(s != fundo_arr, axis=-1)))]
             self.estado.update({
-                "analise": an.resumo(), "fase": "analise", "selecionadas": [0] if sprites else [],
+                "analise": an.resumo(), "fase": "analise",
+                "selecionadas": com_conteudo or ([0] if sprites else []),
+                "celulas_rects": [[int(c.x), int(c.y), int(c.w), int(c.h)] for c in an.celulas],
                 "consideracoes": [], "historico": [], "aprovado": None, "resultados": [],
                 "sprites": [{"id": i, "arquivo": f"sprite-{i:02d}.png", "tamanho": [int(s.shape[1]), int(s.shape[0])]}
                             for i, s in enumerate(sprites)],
@@ -178,6 +171,7 @@ class Studio:
             imgs = [ref_png, (self.out_dir / self.estado["aprovado"]["antes"]).read_bytes(),
                     (self.out_dir / self.estado["aprovado"]["depois"]).read_bytes(), self.sprite_png(alvo)]
         png, usado = openrouter.gerar_imagem(prompt, imgs, model=self.estado["model"])
+        png = _encaixar_png(png, self.sprites[alvo], self.paleta()[1])
         caminho = self.out_dir / f"tentativa-{tentativa:02d}.png"
         caminho.write_bytes(png)
         with self.lock:
@@ -229,8 +223,19 @@ class Studio:
             h, w = self.sprites[idx].shape[:2]
             prompt = prompt_replace(self.estado, self.estado["mudanca"], self.estado["consideracoes"],
                                     imagens=4, w=w, h=h)
-            png, usado = openrouter.gerar_imagem(prompt, [ref, antes, depois, self.sprite_png(idx)],
-                                                 model=self.estado["model"])
+            png, usado = None, ""
+            ultimo_erro = ""
+            for tentativa in range(2):                      # retry automático: arruma falhas na giração
+                try:
+                    png, usado = openrouter.gerar_imagem(prompt, [ref, antes, depois, self.sprite_png(idx)],
+                                                         model=self.estado["model"])
+                    png = _encaixar_png(png, self.sprites[idx], self.paleta()[1])
+                    break
+                except Exception as e:                      # noqa: BLE001
+                    ultimo_erro = str(e)
+                    png = None
+            if png is None:
+                raise ParError(f"sprite {idx}: {ultimo_erro}", "verifique créditos/rate limit e repita")
             (self.out_dir / f"sprite-{idx:02d}-novo.png").write_bytes(png)
             cores, fundo = self.paleta()
             h, w = self.sprites[idx].shape[:2]
@@ -240,6 +245,7 @@ class Studio:
             with self.lock:
                 for r in self.estado["resultados"]:
                     if r["id"] == idx:
+                        r.pop("erro", None)               # limpa resíduo de tentativa anterior
                         r.update({"estado": "ok", "imagem": f"sprite-{idx:02d}-novo.png",
                                   "modelo": usado, **stats})
                 self.salvar()
@@ -256,6 +262,39 @@ class Studio:
                 "erros": sum(1 for r in res if r["estado"] == "erro"),
                 "pendentes": sum(1 for r in res if r["estado"] == "pendente")}
 
+    def _montar_tilesheet(self) -> dict:
+        """Tilesheet final NAS MESMAS PROPORÇÕES da entrada: cada sprite convertida volta ao seu
+        retângulo original (celulas_rects); as células não convertidas ficam como estavam."""
+        origem = self.out_dir / "entrada.png"
+        rects = self.estado.get("celulas_rects") or []
+        if not origem.exists() or not rects:
+            return {}
+        base = np.asarray(Image.open(origem).convert("RGB"))
+        novo = base.copy()
+        cores, fundo = self.paleta()
+        # a sprite de PROVA (aprovada) também entra: é a conversão dela própria
+        ap = self.estado.get("aprovado")
+        if ap and int(ap["sprite"]) < len(rects):
+            x, y, w, h = rects[int(ap["sprite"])]
+            sp_img = Image.open(self.out_dir / ap["depois"]).convert("RGB")
+            sp, _ = imagem.requantizar(sp_img, w, h, cores, fundo)
+            novo[y:y + h, x:x + w] = sp
+        for r in self.estado["resultados"]:
+            if r["estado"] != "ok" or r["id"] >= len(rects):
+                continue
+            x, y, w, h = rects[r["id"]]
+            sp = np.asarray(Image.open(self.out_dir / r["imagem"]).convert("RGB"))
+            if sp.shape[:2] != (h, w):
+                sp = np.asarray(Image.fromarray(sp).resize((w, h), Image.NEAREST))
+            novo[y:y + h, x:x + w] = sp
+        img = Image.fromarray(novo)
+        img.save(self.out_dir / "tilesheet-novo.png")
+        img.resize((img.width * 16, img.height * 16), Image.NEAREST).save(
+            self.out_dir / "tilesheet-novo-expandido.png")
+        imagem.comparacao(base, novo).save(self.out_dir / "tilesheet-comparacao.png")
+        return {"tilesheet_novo": "tilesheet-novo.png", "tilesheet_expandido": "tilesheet-novo-expandido.png",
+                "tilesheet_comparacao": "tilesheet-comparacao.png", "dimensoes": [img.width, img.height]}
+
     def finalizar(self) -> dict:
         galeria = []
         for r in self.estado["resultados"]:
@@ -268,10 +307,11 @@ class Studio:
             comp.save(self.out_dir / nome)
             r["comparacao"] = nome
             galeria.append({"id": idx, "comparacao": nome, "novo": r["imagem"]})
+        folha = self._montar_tilesheet()
         with self.lock:
             self.estado["fase"] = "pronto"
             self.salvar()
-        return {"fase": "pronto", "galeria": galeria, "progresso": self.progresso()}
+        return {"fase": "pronto", "galeria": galeria, "progresso": self.progresso(), **folha}
 
     @property
     def _ref(self) -> bytes:

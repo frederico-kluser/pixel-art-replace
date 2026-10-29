@@ -158,5 +158,60 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(openrouter.parse_data_uri(openrouter.data_uri(png_b)), png_b)
 
 
+class GrelhaPorVaosTests(unittest.TestCase):
+    def test_poses_que_nao_preenchem_a_celula(self):
+        # folha 8x6 com células 79x113: poses pequenas no canto de cada célula (vãos interiores!)
+        larg, alt, cols, linhas, cel = 633, 679, 8, 6, (79, 113)
+        mask = np.zeros((alt, larg), bool)
+        for r in range(linhas):
+            for c in range(cols):
+                y, x = 1 + r * cel[1], 1 + c * cel[0]
+                mask[y:y + 40, x:x + 30] = True
+        g = analise.estimar_grelha_por_vaos(mask)
+        self.assertIsNotNone(g)
+        self.assertEqual((g["colunas"], g["linhas"]), (cols, linhas))
+
+    def test_sprite_unica_sem_grelha(self):
+        mask = np.zeros((50, 40), bool)
+        mask[5:40, 5:30] = True
+        self.assertIsNone(analise.estimar_grelha_por_vaos(mask))
+
+
+class EncaixarTests(unittest.TestCase):
+    def test_encaixa_na_bbox_original_com_aspeto_certo(self):
+        fundo = (0, 160, 248)
+        orig = np.full((12, 8, 3), fundo, np.uint8)
+        orig[2:10, 1:6] = (200, 30, 30)                      # figura 5x8 na posição (1,2)
+        # gerada: figura MAIOR e deslocada, canvas com aspeto ERRADO
+        ger = np.full((200, 150, 3), fundo, np.uint8)
+        ger[40:180, 30:120] = (200, 30, 30)
+        out = imagem.encaixar(Image.fromarray(ger), orig, fundo)
+        self.assertEqual(out.size, (8 * 85, 12 * 85))        # canvas no aspeto 8:12, escala ~1024/12
+        arr = np.asarray(out.convert("RGB"))
+        bb = imagem.bbox_da_figura(arr, fundo)
+        self.assertIsNotNone(bb)
+        esc = out.size[1] / 12
+        self.assertAlmostEqual(bb[0] / esc, 1, delta=1)      # bbox na posição original (±1 px de arte)
+        self.assertAlmostEqual((bb[2] - bb[0]) / esc, 5, delta=1)
+
+
+class LimpezaTests(unittest.TestCase):
+    def test_bloco_sujo_herda_dos_vizinhos(self):
+        cores = np.array([[200, 30, 30], [30, 30, 200]], np.int32)
+        fundo = (0, 160, 248)
+        spr = np.full((8, 8, 3), fundo, np.uint8)
+        spr[2:6, 2:6] = (200, 30, 30)
+        img = imagem.expandir(spr, alvo=96, fundo=fundo)
+        a = np.asarray(img.convert("RGB")).copy()
+        bloco = img.width // 8
+        # bloco MISTURADO (voto contestado): metade cor do vizinho, metade fundo
+        a[bloco * 3:bloco * 4, bloco * 3:bloco * 4] = fundo
+        a[bloco * 3:bloco * 4, bloco * 3:bloco * 3 + bloco // 2] = (200, 30, 30)
+        out, stats = imagem.requantizar(Image.fromarray(a), 8, 8, cores, fundo)
+        self.assertGreater(stats["blocos_sujos"], 0)
+        self.assertGreater(stats["blocos_limpos"], 0)
+        self.assertTrue((out[3, 3] == np.array((200, 30, 30))).all())  # limpo para a cor dos vizinhos
+
+
 if __name__ == "__main__":
     unittest.main()

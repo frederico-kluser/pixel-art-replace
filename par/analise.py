@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 from dataclasses import dataclass, field
+from itertools import pairwise
 
 import numpy as np
 from PIL import Image
@@ -97,6 +98,58 @@ def detectar_grelha(mask: np.ndarray) -> dict | None:
             "consistente": bool(consistente), "celulas": celulas}
 
 
+def _passo_dos_vaos(vazio: np.ndarray) -> int | None:
+    """Passo da grelha pelas PONTAS dos vãos totalmente vazios: cada vão termina onde o conteúdo de
+    uma célula começa (as poses são empacotadas no canto da célula), logo os fins alinham-se na grelha.
+    Testa cada diferença como passo candidato e aceita a MENOR que encaixa ≥90% dos fins (±2 px)."""
+    runs: list[tuple[int, int]] = []
+    ini = None
+    for i, v in enumerate(vazio):
+        if v and ini is None:
+            ini = i
+        elif not v and ini is not None:
+            runs.append((ini, i - 1))
+            ini = None
+    if ini is not None:
+        runs.append((ini, len(vazio) - 1))
+    fins = [b + 1 for a, b in runs]
+    if len(fins) < 3:
+        return None
+    difs = sorted({b - a for a, b in pairwise(fins) if b > a})
+    for p in difs:
+        if p < 8:
+            continue
+        base = fins[0] % p
+        encaixa = sum(1 for f in fins if min(abs((f - base) % p), p - abs((f - base) % p)) <= 2)
+        if encaixa >= 0.9 * len(fins) and len(vazio) / p >= 2.5:
+            return int(p)
+    return None
+
+
+def estimar_grelha_por_vaos(mask: np.ndarray) -> dict | None:
+    """Grelha onde as poses NÃO preenchem a célula (os vãos interiores falsificam a deteção por runs):
+    usa o passo regular entre as pontas dos vãos totalmente vazios."""
+    pitch_x = _passo_dos_vaos(~mask.any(axis=0))
+    pitch_y = _passo_dos_vaos(~mask.any(axis=1))
+    if not pitch_x or not pitch_y:
+        return None
+    cols = max(2, round(mask.shape[1] / pitch_x))
+    linhas = max(2, round(mask.shape[0] / pitch_y))
+    return {"colunas": cols, "linhas": linhas, "celula": [mask.shape[1] // cols, mask.shape[0] // linhas],
+            "consistente": True, "metodo": "vaos"}
+
+
+def celulas_uniformes(larg: int, alt: int, cols: int, linhas: int) -> list[Celula]:
+    """Slicing uniforme com limites fracionários (a folha pode ter margem e não dividir exata)."""
+    out: list[Celula] = []
+    for r in range(linhas):
+        y1, y2 = round(r * alt / linhas), round((r + 1) * alt / linhas)
+        for c in range(cols):
+            x1, x2 = round(c * larg / cols), round((c + 1) * larg / cols)
+            out.append(Celula(x1, y1, x2 - x1, y2 - y1))
+    return out
+
+
 def analisar(png: bytes, *, com_ia: bool = True, api_key: str | None = None) -> Analise:
     """Analisa o upload: classificação do MiMo + recortes algorítmicos."""
     arr, tem_alfa = carregar(png)
@@ -111,8 +164,9 @@ def analisar(png: bytes, *, com_ia: bool = True, api_key: str | None = None) -> 
         except Exception as e:                   # noqa: BLE001 - a análise algorítmica sozinha chega
             ia = {"erro": str(e)}
     tipo_ia = str(ia.get("tipo", "")).lower()
-    # decisão: grelha algorítmica confiável → tilesheet; senão, a do MiMo
-    if grelha and grelha["consistente"] or tipo_ia == "tilesheet":
+    # grelha confiável por runs; senão, pelos VAÃOS (poses que não preenchem a célula); senão, o MiMo
+    vaos = None if (grelha and grelha["consistente"]) else estimar_grelha_por_vaos(mask)
+    if (grelha and grelha["consistente"]) or vaos or tipo_ia == "tilesheet":
         tipo = "tilesheet"
     else:
         tipo = "sprite"
@@ -120,16 +174,19 @@ def analisar(png: bytes, *, com_ia: bool = True, api_key: str | None = None) -> 
     if tipo == "tilesheet":
         if grelha and grelha["consistente"]:
             celulas = grelha["celulas"]
+            cols, rows = grelha["colunas"], grelha["linhas"]
         else:
-            cols = int(ia.get("colunas") or 1)
-            rows = int(ia.get("linhas") or 1)
+            cols = (vaos or {}).get("colunas") or int(ia.get("colunas") or 1)
+            rows = (vaos or {}).get("linhas") or int(ia.get("linhas") or 1)
             if cols * rows < 2:
                 tipo = "sprite"
             else:
-                celulas = [Celula(x * (w // cols), y * (h // rows), w // cols, h // rows)
-                           for y in range(rows) for x in range(cols)]
+                celulas = celulas_uniformes(w, h, cols, rows)
+                if vaos:
+                    grelha = vaos
     else:
         celulas = [Celula(0, 0, w, h)]
+        cols = rows = 1
     return Analise(tipo, w, h, fundo, tem_alfa, celulas,
                    algoritmo={k: v for k, v in (grelha or {}).items() if k != "celulas"} if grelha else {"grelha": "não detetada"},
                    ia=ia)

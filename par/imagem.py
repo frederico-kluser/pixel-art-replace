@@ -16,6 +16,51 @@ from .util import ParError
 ALVO = 1024                    # lado maior de referência das ferramentas de geração
 K_MAX = 64
 
+# folhas expandidas grandes são normais: sem teto de "decompression bomb" do PIL
+Image.MAX_IMAGE_PIXELS = max(Image.MAX_IMAGE_PIXELS or 0, 2_000_000_000)
+
+
+def bbox_da_figura(arr: np.ndarray, fundo: tuple[int, int, int], tol: int = 60) -> tuple[int, int, int, int] | None:
+    """(x1, y1, x2, y2) dos píxeis que NÃO são fundo (distância > tol)."""
+    dist = np.abs(arr.astype(np.int32) - np.array(fundo, np.int32)).sum(axis=-1)
+    m = dist > tol
+    if not m.any():
+        return None
+    ys, xs = np.nonzero(m)
+    return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
+
+
+def encaixar(gerada: Image.Image, original: np.ndarray, fundo: tuple[int, int, int]) -> Image.Image:
+    """Encaixa a figura GERADA na bbox exata da ORIGINAL: os modelos tendem a redesenhar a figura
+    maior/deslocada e até a mudar o aspect ratio — aqui o canvas sai SEMPRE no aspeto exato da célula
+    (escala uniforme S≈1024/lado maior) e a figura entra na bbox original. Determinístico: corrige o
+    drift de escala/aspeto de TODAS as sprites da giração de uma vez."""
+    g = np.asarray(gerada.convert("RGB"))
+    gh, gw = g.shape[:2]
+    oh, ow = original.shape[:2]
+    s_out = max(1, round(1024 / max(ow, oh)))                 # canvas de saída ≈1024 px no lado maior
+    p = max(2, min(gh, gw) // 20)
+    cantos = np.concatenate([g[:p, :p].reshape(-1, 3), g[:p, -p:].reshape(-1, 3),
+                             g[-p:, :p].reshape(-1, 3), g[-p:, -p:].reshape(-1, 3)])
+    bg_g = tuple(int(v) for v in np.median(cantos, axis=0))
+    bb_g = bbox_da_figura(g, bg_g)
+    bb_o = bbox_da_figura(original, fundo)
+    if bb_g is None or bb_o is None:
+        return Image.fromarray(g)
+    gx1, gy1, gx2, gy2 = bb_g
+    ox1, oy1, ox2, oy2 = bb_o
+    alvo_w = (ox2 - ox1) * s_out
+    alvo_h = (oy2 - oy1) * s_out
+    esc = min(alvo_w / max(1, gx2 - gx1), alvo_h / max(1, gy2 - gy1))
+    nova_w = max(1, round((gx2 - gx1) * esc))
+    nova_h = max(1, round((gy2 - gy1) * esc))
+    recorte = gerada.convert("RGB").crop((gx1, gy1, gx2, gy2)).resize((nova_w, nova_h), Image.LANCZOS)
+    tela = Image.new("RGB", (ow * s_out, oh * s_out), bg_g)
+    destino = (round(ox1 * s_out) + round((alvo_w - nova_w) / 2),
+               round(oy1 * s_out) + round((alvo_h - nova_h) / 2))
+    tela.paste(recorte, destino)
+    return tela
+
 
 def paleta_da_sprite(spr: np.ndarray) -> tuple[np.ndarray, tuple[int, int, int]]:
     """(lista de cores únicas, fundo) — o fundo é a cor mais comum; máx. 32 cores."""
@@ -46,14 +91,15 @@ def bloco_expandido(img: Image.Image, w: int, h: int) -> int:
 def requantizar(img: Image.Image, w: int, h: int, cores: np.ndarray,
                 fundo: tuple[int, int, int], limiar: float = 0.7) -> tuple[np.ndarray, dict]:
     """Imagem devolvida (qualquer tamanho, mesmo aspect ratio) → sprite w×h na paleta original.
-    Voto maioritário do interior de cada bloco; blocos sujos (voto contestado) são reportados."""
+    Voto maioritário do interior de cada bloco; blocos sujos (voto contestado) são LIMPOS pela moda
+    dos vizinhos quando há maioria clara (≥5 de 8) e depois reportados."""
     arr = np.asarray(img.convert("RGB"), np.int32)
     if abs(arr.shape[1] / arr.shape[0] - w / h) > 0.02 * (w / h) + 0.02:
         raise ParError(f"aspect ratio mudou: devolvida {arr.shape[1]}x{arr.shape[0]}, sprite {w}x{h}",
                        "peça ao modelo manter o aspect ratio")
     paleta = np.vstack([np.array(fundo, np.int32), cores]) if tuple(fundo) not in [tuple(c) for c in cores] else cores
     out = np.zeros((h, w, 3), np.int32)
-    sujos = 0
+    sujos: list[tuple[int, int]] = []
     pur = 0.0
     for yy in range(h):
         for xx in range(w):
@@ -73,9 +119,34 @@ def requantizar(img: Image.Image, w: int, h: int, cores: np.ndarray,
             out[yy, xx] = paleta[vencedor]
             pur += pureza
             if pureza < limiar:
-                sujos += 1
-    stats = {"pureza": round(pur / (w * h), 4), "blocos_sujos": sujos}
+                sujos.append((yy, xx))
+    limpos = _limpar_sujos(out, sujos)
+    stats = {"pureza": round(pur / (w * h), 4), "blocos_sujos": len(sujos), "blocos_limpos": limpos}
     return out.astype(np.uint8), stats
+
+
+def _limpar_sujos(out: np.ndarray, sujos: list[tuple[int, int]]) -> int:
+    """Bloco sujo herda a MODA dos vizinhos quando há maioria clara (≥5 de 8) — limpa o
+    'quadrado que não ficou correto' em vez de só o reportar."""
+    if not sujos:
+        return 0
+    h, w = out.shape[:2]
+    sujo = set(sujos)
+    limpos = 0
+    for y, x in sujos:
+        votos: dict[tuple[int, int, int], int] = {}
+        for ny in range(max(0, y - 1), min(h, y + 2)):
+            for nx in range(max(0, x - 1), min(w, x + 2)):
+                if (ny, nx) == (y, x) or (ny, nx) in sujo:
+                    continue
+                cor = tuple(int(v) for v in out[ny, nx])
+                votos[cor] = votos.get(cor, 0) + 1
+        if votos:
+            cor, n = max(votos.items(), key=lambda kv: kv[1])
+            if n >= 5:
+                out[y, x] = cor
+                limpos += 1
+    return limpos
 
 
 def comparacao(antes: np.ndarray, depois: np.ndarray) -> Image.Image:
