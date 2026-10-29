@@ -1,0 +1,2 @@
+[console_scripts]
+par = par.cli:main

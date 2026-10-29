@@ -7,29 +7,29 @@ Substitui o look de sprites/pixel art com IA — do upload à aprovação — se
 ## Como rodar (ver a interface)
 
 A interface é uma **app React** (`web/`, com Tailwind + shadcn + Motion) servida pelo backend Python.
+Copie os blocos **na íntegra** — funcionam a partir da raiz do projeto.
 
 ```bash
-# 1) dependências do backend (uma vez)
+# 1) dependências (uma vez): backend + comando global `par`
 pip install -r requirements.txt
+pip install -e .          # passa a poder correr `par` de QUALQUER pasta
 
 # 2) construir a interface (uma vez; ou após mudanças em web/)
-cd web
-npm install
-npm run build
-cd ..
+cd web && npm install && npm run build && cd ..
 
-# 3) subir o studio — a interface fica em http://127.0.0.1:8770/
-python -m par studio folha.png --out trabalho/ --mudanca "um look novo de samurai"
+# 3) subir o studio com a folha de exemplo
+par studio examples/folha-teste.png --out trabalho --mudanca "um look novo de samurai"
 ```
 
 Abra **<http://127.0.0.1:8770/>** no navegador: o fluxo guiado é
 **1 Imagem → 2 Look → 3 Prova → 4 Lote → 5 Resultado**.
 
+Sem `pip install -e .`, o equivalente é `python -m par studio …` **a partir da raiz do projeto**.
+
 **Modo desenvolvimento** (hot reload): mantenha o backend a correr (passo 3) e, noutro terminal:
 
 ```bash
-cd web
-npm run dev     # → http://127.0.0.1:5173/ (faz proxy da API para a porta 8770)
+cd web && npm run dev     # → http://127.0.0.1:5173/ (faz proxy da API para a porta 8770)
 ```
 
 > A chave da OpenRouter lê-se de `OPENROUTER_API_KEY` ou `~/.dsh/.credentials.yaml` (nunca é pedida
@@ -61,14 +61,16 @@ enviar UMA sprite ou uma TILESHEET
 
 ```bash
 # análise rápida (e recorte, com --out)
-python -m par analisar folha.png --out recortes/
+par analisar folha.png --out recortes/
 
 # expandir uma sprite para a resolução das ferramentas de geração
-python -m par expandir sprite.png --out sprite-grande.png
+par expandir sprite.png --out sprite-grande.png
 
 # studio completo (mesmo do passo 3 acima)
-python -m par studio folha.png --out trabalho/ --mudanca "novo traje"
+par studio folha.png --out trabalho --mudanca "novo traje"
 ```
+
+(`python -m par …` também funciona, a partir da raiz do projeto.)
 
 ## Estrutura
 
