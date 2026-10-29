@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import json
+import mimetypes
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,6 +25,8 @@ from . import analise, imagem, openrouter
 from .util import ParError, read_json, write_json
 
 MAX_PARALELO = 32                                     # "máximo de concorrência possível"
+RAIZ = Path(__file__).resolve().parent.parent
+DIST = RAIZ / "web" / "dist"                          # interface React (npm run build em web/)
 
 
 # ── prompts ───────────────────────────────────────────────────────────────────
@@ -267,90 +270,6 @@ class Studio:
 
 # ── servidor HTTP ─────────────────────────────────────────────────────────────
 
-HTML = r"""<!doctype html><html lang="pt"><head><meta charset="utf-8">
-<title>pixel-art-replace</title><style>
-body{background:#121218;color:#ebebeb;font:14px/1.5 system-ui,sans-serif;margin:0;padding:24px}
-h1{font-size:19px}h2{font-size:15px;margin:16px 0 8px}
-img{image-rendering:pixelated;background:#1a1a22;border:1px solid #333;max-width:380px}
-.thumb{max-width:96px;cursor:pointer;border:3px solid transparent}
-.thumb.sel{border-color:#2b5bd7}
-button{background:#2b5bd7;color:#fff;border:0;border-radius:6px;padding:8px 14px;margin:4px 4px 4px 0;cursor:pointer}
-button.red{background:#a33}button.grn{background:#2b7a3b}button:disabled{opacity:.45;cursor:default}
-textarea{width:100%;max-width:640px;background:#1c1c24;color:#eee;border:1px solid #333;border-radius:6px;padding:8px}
-.row{display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start}.col{flex:1;min-width:300px}
-.bar{height:10px;background:#222;border-radius:5px;overflow:hidden;max-width:640px}.bar i{display:block;height:100%;background:#2b5bd7;width:0}
-.small{color:#9aa;font-size:12px}</style></head><body>
-<h1>pixel-art-replace</h1>
-<p class="small">sprite ou tilesheet → análise (MiMo v2.6 Pro) → expandir → replace com referência → aprovar → ajustar tudo em paralelo</p>
-<div class="row"><div class="col">
-<h2>1 · Imagem (sprite ou tilesheet)</h2>
-<input type="file" id="img" accept="image/*"> <button id="analisar">Analisar</button>
-<p class="small" id="aninfo">–</p>
-<div id="thumbs"></div>
-<p class="small">clique nas sprites que quer incluir (em tilesheets)</p>
-</div><div class="col">
-<h2>2 · Referência + mudança</h2>
-<input type="file" id="ref" accept="image/*">
-<p class="small" id="refok">nenhuma referência</p>
-<label>O que mudar (CHANGE):<br><textarea id="mudanca" rows="2">Redraw with a completely new outfit and look (same pose, same silhouette)</textarea></label>
-<button id="gerar" class="grn">Gerar replace de prova</button>
-</div></div>
-<h2>3 · Aprovar ou rejeitar</h2>
-<div class="row"><div><p class="small">original</p><img id="orig"></div>
-<div><p class="small">gerado (tentativa <span id="tent">–</span>)</p><img id="gerada"></div></div>
-<p><label>Considerações para a retentativa:<br><textarea id="cons" rows="2"></textarea></label></p>
-<button id="rejeitar" class="red" disabled>Rejeitar e regerar</button>
-<button id="aprovar" class="grn" disabled>Aprovar</button>
-<h2>4 · Ajustar todas (paralelo)</h2>
-<button id="converter" disabled>Ajustar todas as selecionadas</button>
-<div class="bar"><i id="prog"></i></div><p class="small" id="progtext">–</p>
-<h2>5 · Resultado</h2><div id="galeria" class="row"></div>
-<script>
-const $=id=>document.getElementById(id);let imgB64=null,refB64=null,selecionadas=new Set([0]);
-const b64=f=>new Promise(r=>{const fr=new FileReader();fr.onload=()=>r(fr.result.split(',')[1]);fr.readAsDataURL(f)});
-$('img').onchange=async e=>{const f=e.target.files[0];if(f)imgB64=await b64(f);};
-$('ref').onchange=async e=>{const f=e.target.files[0];if(f){refB64=await b64(f);$('refok').textContent='referência: '+f.name;}};
-async function api(path,body){const r=await fetch(path,{method:body?'POST':'GET',
-  headers:{'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});
-  const j=await r.json();if(!r.ok)throw new Error(j.erro||r.status);return j;}
-function thumbs(sprites){$('thumbs').innerHTML=sprites.map(s=>
-  `<img class="thumb ${selecionadas.has(s.id)?'sel':''}" data-id="${s.id}" src="/sprite/${s.id}.png">`).join('');
-  document.querySelectorAll('.thumb').forEach(el=>el.onclick=()=>{const id=+el.dataset.id;
-   selecionadas.has(id)?selecionadas.delete(id):selecionadas.add(id);el.classList.toggle('sel');
-   api('/api/selecionar',{ids:[...selecionadas]}).catch(()=>{});});}
-$('analisar').onclick=async()=>{if(!imgB64)return alert('escolha uma imagem');
-  $('analisar').disabled=true;try{const r=await api('/api/analisar',{img:imgB64});
-   $('aninfo').textContent=`${r.analise.tipo} · ${r.analise.tamanho[0]}x${r.analise.tamanho[1]} · ${r.analise.celulas} células`+
-     (r.analise.ia&&r.analise.ia.nota?` · MiMo: ${r.analise.ia.nota}`:'');
-   selecionadas=new Set(r.tipo=='tilesheet'?[0]:[0]);thumbs(r.sprites);
-   $('orig').src='/sprite/0.png';$('gerar').disabled=false;}catch(e){alert('Erro: '+e.message)}
-  $('analisar').disabled=false;};
-$('gerar').onclick=async()=>{if(!refB64)return alert('carregue a imagem de referência');
-  $('gerar').disabled=true;try{const r=await api('/api/gerar',{mudanca:$('mudanca').value});
-   $('gerada').src='/ficheiros/'+r.imagem+'?t='+Date.now();$('tent').textContent=r.tentativa;
-   $('orig').src='/sprite/'+r.sprite+'.png';$('rejeitar').disabled=false;$('aprovar').disabled=false;
-   $('converter').disabled=true;}catch(e){alert('Erro: '+e.message)}$('gerar').disabled=false;};
-$('rejeitar').onclick=async()=>{$('rejeitar').disabled=true;try{
-  const r=await api('/api/gerar',{mudanca:$('mudanca').value,consideracao:$('cons').value});
-  $('gerada').src='/ficheiros/'+r.imagem+'?t='+Date.now();$('tent').textContent=r.tentativa;
-  $('cons').value='';}catch(e){alert('Erro: '+e.message)}$('rejeitar').disabled=false;};
-$('aprovar').onclick=async()=>{try{await api('/api/aprovar',{});$('converter').disabled=false;
-  $('aprovar').disabled=$('rejeitar').disabled=true;}catch(e){alert('Erro: '+e.message)}};
-$('converter').onclick=async()=>{$('converter').disabled=true;
-  try{await api('/api/converter',{});}catch(e){alert('Erro: '+e.message)}
-  const t=setInterval(async()=>{try{await estado();}catch(e){}
-   if($('prog').style.width=='100%'){clearInterval(t);resultado();}},2000);};
-async function estado(){const s=await api('/api/estado');const p=s.progresso;
-  $('prog').style.width=(p.total?100*p.ok/p.total:0)+'%';
-  $('progtext').textContent=p.total?`${p.ok}/${p.total} ajustadas · ${p.erros} erros`:'–';}
-async function resultado(){const r=await api('/api/resultado');
-  $('galeria').innerHTML=(r.galeria||[]).map(g=>
-   `<div><p class="small">sprite ${g.id}</p><a href="/ficheiros/${g.comparacao}" target="_blank">
-    <img src="/ficheiros/${g.comparacao}"></a></div>`).join('');}
-estado().catch(()=>{});
-</script></body></html>"""
-
-
 def fazer_handler(studio: Studio):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -361,8 +280,16 @@ def fazer_handler(studio: Studio):
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(data)
+
+        def do_OPTIONS(self):
+            self.send_response(204)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+            self.end_headers()
 
         def _erro(self, e):
             self._json({"erro": str(getattr(e, "what", None) or e)}, 500)
@@ -371,37 +298,68 @@ def fazer_handler(studio: Studio):
             self.send_response(200)
             self.send_header("Content-Type", "image/png")
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(data)
+
+        def _estatico(self, rel: str) -> bool:
+            """Serve um ficheiro de web/dist (a interface React). Devolve False se não existir."""
+            alvo = (DIST / rel.lstrip("/")).resolve()
+            if DIST.resolve() not in alvo.parents or not alvo.is_file():
+                return False
+            dados = alvo.read_bytes()
+            tipo = mimetypes.guess_type(alvo.name)[0] or "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", tipo)
+            self.send_header("Content-Length", str(len(dados)))
+            self.end_headers()
+            self.wfile.write(dados)
+            return True
 
         def do_GET(self):
             try:
                 if self.path in ("/", "/index.html"):
-                    data = HTML.encode()
+                    if (DIST / "index.html").exists():
+                        self._estatico("/index.html")
+                        return
+                    corpo = ("<b>web/dist não existe.</b> Para ver a interface: "
+                             "<code>cd web &amp;&amp; npm install &amp;&amp; npm run build</code> "
+                             "(ou <code>npm run dev</code> para o servidor de desenvolvimento).").encode()
                     self.send_response(200)
                     self.send_header("Content-Type", "text/html; charset=utf-8")
-                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Content-Length", str(len(corpo)))
                     self.end_headers()
-                    self.wfile.write(data)
-                elif self.path.startswith("/sprite/"):
-                    self._png(studio.sprite_png(int(self.path[len("/sprite/"):-4])))
-                elif self.path.startswith("/ficheiros/"):
-                    nome = self.path[len("/ficheiros/"):].split("?")[0]
-                    alvo = (studio.out_dir / nome).resolve()
-                    if studio.out_dir.resolve() not in alvo.parents:
-                        raise ParError("caminho fora do diretório")
-                    self._png(alvo.read_bytes())
-                elif self.path == "/api/estado":
-                    self._json({"fase": studio.estado["fase"], "model": studio.estado["model"],
-                                "analise": studio.estado["analise"], "sprites": studio.estado["sprites"],
-                                "selecionadas": studio.estado["selecionadas"],
-                                "progresso": studio.progresso(), "resultados": studio.estado["resultados"]})
-                elif self.path == "/api/resultado":
-                    self._json(studio.finalizar())
+                    self.wfile.write(corpo)
+                elif self.path.startswith("/api/") or self.path.startswith("/sprite/") \
+                        or self.path.startswith("/ficheiros/"):
+                    self._rota_api()
+                elif self._estatico(self.path.split("?")[0]):
+                    return
+                elif (DIST / "index.html").exists():
+                    self._estatico("/index.html")     # SPA fallback
                 else:
                     self._json({"erro": "não encontrado"}, 404)
             except Exception as e:                       # noqa: BLE001
                 self._erro(e)
+
+        def _rota_api(self):
+            if self.path.startswith("/sprite/"):
+                self._png(studio.sprite_png(int(self.path[len("/sprite/"):-4])))
+            elif self.path.startswith("/ficheiros/"):
+                nome = self.path[len("/ficheiros/"):].split("?")[0]
+                alvo = (studio.out_dir / nome).resolve()
+                if studio.out_dir.resolve() not in alvo.parents:
+                    raise ParError("caminho fora do diretório")
+                self._png(alvo.read_bytes())
+            elif self.path == "/api/estado":
+                self._json({"fase": studio.estado["fase"], "model": studio.estado["model"],
+                            "analise": studio.estado["analise"], "sprites": studio.estado["sprites"],
+                            "selecionadas": studio.estado["selecionadas"],
+                            "progresso": studio.progresso(), "resultados": studio.estado["resultados"]})
+            elif self.path == "/api/resultado":
+                self._json(studio.finalizar())
+            else:
+                self._json({"erro": "não encontrado"}, 404)
 
         def do_POST(self):
             try:
