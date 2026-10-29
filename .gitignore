@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+*.egg-info/
 
 # segredos: NUNCA committar chaves
 .env
