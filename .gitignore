@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# segredos: NUNCA committar chaves
+.env
+*.key
+
+# trabalho do studio (resultados gerados)
+trabalho*/
+recortes*/
+studio.json
+sprite-*-novo.png
+tentativa-*.png
+comparacao-*.png
+
+# sistema
+.DS_Store
+Thumbs.db
