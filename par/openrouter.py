@@ -21,9 +21,27 @@ from pathlib import Path
 from .util import ParError
 
 API = "https://openrouter.ai/api/v1/chat/completions"
+API_IMAGENS = "https://openrouter.ai/api/v1/images"
 MODELO_ANALISE = "xiaomi/mimo-v2.6-pro"                  # o MiMo analisa a imagem (sprite vs tilesheet)
-MODELO_IMAGEM = "google/gemini-3-pro-image"              # melhor modelo de imagem: edição com referências, 4K
-FALLBACK_IMAGEM = ["google/gemini-3.1-flash-image", "google/gemini-nano-banana-2.1"]
+
+# 3 CAMPEÕES (estudo 2026-10, benchmark próprio em trabalho-ken/benchmark.json):
+#   riverflow-v2.5-pro  — #1 em qualidade/edição (77/81), juiz interno · /images (limite 4.5 MB)
+#   gpt-image-2.5-flare — #2 global (75/81), lote rápido (P50 13 s)        · /images
+#   gpt-image-2         — #3 global (74/81), #1 em Minimal Diff (2/3)      · /images
+MODELOS = {
+    "sourceful/riverflow-v2.5-pro": {"endpoint": "images",
+                                     "params": {"output_format": "png", "aspect_ratio": "1:1"}},
+    "openai/gpt-image-2.5-flare": {"endpoint": "images",
+                                   "params": {"output_format": "png", "quality": "auto", "size": "1024x1024"}},
+    "openai/gpt-image-2": {"endpoint": "images",
+                           "params": {"output_format": "png", "quality": "high", "size": "1024x1024"}},
+    "openai/gpt-5.4-image-2": {"endpoint": "chat", "params": {}},
+    "google/gemini-nano-banana-2.1": {"endpoint": "chat", "params": {}},
+    "google/gemini-3-pro-image": {"endpoint": "chat", "params": {}},
+    "google/gemini-3.1-flash-image": {"endpoint": "chat", "params": {}},
+}
+MODELO_IMAGEM = "openai/gpt-image-2"                      # confirmado pelo benchmark (critérios: aferição)
+FALLBACK_IMAGEM = ["openai/gpt-image-2.5-flare", "sourceful/riverflow-v2.5-pro"]
 RETRIES = 4
 
 ERROS = {
@@ -60,11 +78,11 @@ def parse_data_uri(url: str) -> bytes:
         return r.read()
 
 
-def _post(body: dict, api_key: str | None = None) -> dict:
+def _post(body: dict, api_key: str | None = None, url: str = API) -> dict:
     key = api_key or openrouter_key()
     ultimo = ""
     for tentativa in range(RETRIES):
-        req = urllib.request.Request(API, data=json.dumps(body).encode(), method="POST", headers={
+        req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers={
             "Authorization": f"Bearer {key}", "Content-Type": "application/json",
             "HTTP-Referer": "https://github.com/frederico-kluser/pixel-art-replace",
             "X-OpenRouter-Title": "pixel-art-replace",
@@ -79,7 +97,7 @@ def _post(body: dict, api_key: str | None = None) -> dict:
             except Exception as e2:                        # noqa: BLE001 - corpo não-JSON é comum em gateways
                 detalhe = f"(sem detalhe: {type(e2).__name__})"
             ultimo = ERROS.get(e.status, f"HTTP {e.status}") + (f" — {detalhe}" if detalhe else "")
-            if e.status in (429, 500, 502, 503):
+            if e.status in (429, 500, 502, 503, 520, 522, 524):
                 time.sleep(min(float(e.headers.get("Retry-After") or 2 ** tentativa * 5), 60))
                 continue
             raise ParError(f"OpenRouter recusou: {ultimo}", "corrija e repita; nada foi gasto desta vez") from None
@@ -111,16 +129,63 @@ def analisar_ia(png: bytes, *, model: str = MODELO_ANALISE, api_key: str | None 
         raise ParError(f"JSON de análise inválido: {e}", "repita a análise") from None
 
 
-def gerar_imagem(prompt: str, imagens: list[bytes], *, model: str = MODELO_IMAGEM,
-                 extra_models: list[str] | None = FALLBACK_IMAGEM, api_key: str | None = None) -> tuple[bytes, str]:
-    """Gera/edita imagem: modalities image+text. Devolve (png, modelo_efetivo)."""
+def _comprimir_refs(imagens: list[bytes], limite: int = 3_500_000) -> list[bytes]:
+    """Guarda de payload: alguns providers (Sourceful) impõem ~4.5 MB por pedido. Se o total em base64
+    passar o limite, as imagens são reduzidas para ≤1024 px e reencodadas em JPEG (só a referência)."""
+    total = sum(len(base64.b64encode(i)) for i in imagens)
+    if total <= limite:
+        return imagens
+    from io import BytesIO
+
+    from PIL import Image
+    out = []
+    for img in imagens:
+        if len(base64.b64encode(img)) < 700_000:
+            out.append(img)
+            continue
+        im = Image.open(BytesIO(img)).convert("RGB")
+        im.thumbnail((1024, 1024))
+        buf = BytesIO()
+        im.save(buf, "JPEG", quality=85)
+        out.append(buf.getvalue())
+    return out
+
+
+def _gerar_images(prompt: str, imagens: list[bytes], modelo: str,
+                  api_key: str | None = None, stats: dict | None = None) -> tuple[bytes, str]:
+    """Endpoint DEDICADO de imagens: input_references + output_format png. Cobre os campeões
+    (riverflow, gpt-image-2, flare…). Faturação all-or-nothing: erro não cobra."""
+    cfg = MODELOS.get(modelo, {"params": {"output_format": "png"}})
+    refs = [{"type": "image_url", "image_url": {"url": data_uri(i)}} for i in _comprimir_refs(imagens)]
+    body = {"model": modelo, "prompt": prompt, "input_references": refs,
+            **cfg.get("params", {})}
+    resp = _post(body, api_key, url=API_IMAGENS)
+    if stats is not None:
+        stats.update({"cost": (resp.get("usage") or {}).get("cost"), "usage": resp.get("usage")})
+    itens = resp.get("data") or []
+    if not itens:
+        raise ParError(f"resposta sem imagem: {str(resp)[:200]}",
+                       "confirme o modelo no catálogo (/models?output_modalities=image)")
+    d = itens[0]
+    if d.get("b64_json"):
+        return base64.b64decode(d["b64_json"]), resp.get("model", modelo)
+    if d.get("url"):
+        return parse_data_uri(d["url"]), resp.get("model", modelo)
+    raise ParError("resposta de imagem sem conteúdo", "repita; se persistir troque de modelo")
+
+
+def _gerar_chat(prompt: str, imagens: list[bytes], modelo: str, extra_models: list[str] | None,
+                api_key: str | None = None, stats: dict | None = None) -> tuple[bytes, str]:
+    """Endpoint /chat/completions com modalities image+text (famílias Google e gpt-5.4-image)."""
     content: list[dict] = [{"type": "text", "text": prompt}]
     content += [{"type": "image_url", "image_url": {"url": data_uri(img)}} for img in imagens]
-    body = {"model": model, "modalities": ["image", "text"],
+    body = {"model": modelo, "modalities": ["image", "text"],
             "messages": [{"role": "user", "content": content}]}
     if extra_models:
-        body["models"] = ([model] + [m for m in extra_models if m != model])[:3]   # teto do OpenRouter: 3
+        body["models"] = ([modelo] + [m for m in extra_models if m != modelo])[:3]   # teto do OpenRouter: 3
     resp = _post(body, api_key)
+    if stats is not None:
+        stats.update({"cost": (resp.get("usage") or {}).get("cost"), "usage": resp.get("usage")})
     try:
         msg = resp["choices"][0]["message"]
     except (KeyError, IndexError, TypeError):
@@ -129,10 +194,30 @@ def gerar_imagem(prompt: str, imagens: list[bytes], *, model: str = MODELO_IMAGE
     if msg.get("images"):
         url = msg["images"][0].get("image_url", {}).get("url") or msg["images"][0].get("url")
         if url:
-            return parse_data_uri(url), resp.get("model", model)
+            return parse_data_uri(url), resp.get("model", modelo)
     if isinstance(msg.get("content"), list):
         for part in msg["content"]:
             if part.get("type") == "image_url":
-                return parse_data_uri(part["image_url"]["url"]), resp.get("model", model)
+                return parse_data_uri(part["image_url"]["url"]), resp.get("model", modelo)
     raise ParError("resposta sem imagem (o modelo só descreveu?)",
                    'confirme modalities:["image","text"] e que o modelo gera imagem')
+
+
+def gerar_imagem(prompt: str, imagens: list[bytes], *, model: str = MODELO_IMAGEM,
+                 extra_models: list[str] | None = FALLBACK_IMAGEM, api_key: str | None = None) -> tuple[bytes, str]:
+    """Gera/edita imagem. Cada modelo vai pelo SEU endpoint (chat ou /images); os fallbacks tentam-se
+    em sequência. Devolve (png, modelo_efetivo)."""
+    candidatos = [model] + [m for m in (extra_models or []) if m != model]
+    erros = []
+    for modelo in candidatos:
+        cfg = MODELOS.get(modelo, {"endpoint": "chat", "params": {}})
+        try:
+            if cfg["endpoint"] == "images":
+                return _gerar_images(prompt, imagens, modelo, api_key)
+            return _gerar_chat(prompt, imagens, modelo,
+                               [m for m in candidatos if m != modelo][:2] if model == modelo else None,
+                               api_key)
+        except ParError as e:
+            erros.append(f"{modelo}: {e.args[0] if e.args else e}")
+    raise ParError("todos os modelos falharam — " + " · ".join(erros)[:400],
+                   "verifique créditos/rate limit e o catálogo de modelos")
