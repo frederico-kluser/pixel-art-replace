@@ -11,6 +11,7 @@ Fluxo (o que o dono pediu):
 from __future__ import annotations
 
 import base64
+import io
 import json
 import mimetypes
 import threading
@@ -21,7 +22,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import analise, imagem, openrouter
+from . import analise, imagem, medida, openrouter
 from .util import ParError, read_json, write_json
 
 MAX_PARALELO = 32                                     # "máximo de concorrência possível"
@@ -31,7 +32,6 @@ DIST = RAIZ / "web" / "dist"                          # interface React (npm run
 
 def _encaixar_png(png: bytes, original: np.ndarray, fundo: tuple[int, int, int]) -> bytes:
     """Geração → encaixe na bbox original (drift de escala do modelo) → PNG."""
-    import io
     ajustada = imagem.encaixar(Image.open(io.BytesIO(png)), original, fundo)
     buf = io.BytesIO()
     ajustada.save(buf, "PNG")
@@ -174,12 +174,17 @@ class Studio:
         png = _encaixar_png(png, self.sprites[alvo], self.paleta()[1])
         caminho = self.out_dir / f"tentativa-{tentativa:02d}.png"
         caminho.write_bytes(png)
+        # PORTÃO DETERMINÍSTICO: aferir a conversão ANTES de o utilizador decidir
+        cores, fundo = self.paleta()
+        arte, _ = imagem.requantizar(Image.open(io.BytesIO(png)), w, h, cores, fundo)
+        med = medida.medir_sprite(self.sprites[alvo], arte, fundo)
         with self.lock:
             self.estado["historico"].append({"tentativa": tentativa, "sprite": alvo, "modelo": usado,
                                              "consideracoes": self.estado["consideracoes"][-1:] or [],
-                                             "imagem": caminho.name})
+                                             "imagem": caminho.name, "medicao": med})
             self.salvar()
-        return {"tentativa": tentativa, "imagem": caminho.name, "modelo": usado, "sprite": alvo}
+        return {"tentativa": tentativa, "imagem": caminho.name, "modelo": usado, "sprite": alvo,
+                "medicao": med}
 
     def aprovar(self) -> dict:
         if not self.estado["historico"]:
@@ -242,6 +247,8 @@ class Studio:
             novo, stats = imagem.requantizar(Image.open(self.out_dir / f"sprite-{idx:02d}-novo.png"),
                                              w, h, cores, fundo)
             Image.fromarray(novo).save(self.out_dir / f"sprite-{idx:02d}-novo.png")
+            # PORTÃO DETERMINÍSTICO: medir cada conversão (aparece no resultado antes de qualquer uso)
+            stats["medicao"] = medida.medir_sprite(self.sprites[idx], novo, fundo)
             with self.lock:
                 for r in self.estado["resultados"]:
                     if r["id"] == idx:

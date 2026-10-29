@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from par import analise, imagem, openrouter, studio
+from par import analise, imagem, medida, openrouter, studio
 from par.util import ParError
 
 
@@ -211,6 +211,51 @@ class LimpezaTests(unittest.TestCase):
         self.assertGreater(stats["blocos_sujos"], 0)
         self.assertGreater(stats["blocos_limpos"], 0)
         self.assertTrue((out[3, 3] == np.array((200, 30, 30))).all())  # limpo para a cor dos vizinhos
+
+
+class MedidaTests(unittest.TestCase):
+    fundo = (0, 160, 248)
+
+    def _sprite(self, x1, y1, x2, y2):
+        s = np.full((24, 16, 3), self.fundo, np.uint8)
+        s[y1:y2, x1:x2] = (200, 30, 30)
+        return s
+
+    def test_identidade_e_perfeita(self):
+        a = self._sprite(2, 2, 10, 20)
+        m = medida.medir_sprite(a, a.copy(), self.fundo)
+        self.assertEqual(m["veredito"], "ok")
+        self.assertEqual(m["iou_silhueta"], 1.0)
+        self.assertEqual(m["proporcao"], 1.0)
+
+    def test_escala_reprovada(self):
+        a = self._sprite(2, 2, 10, 20)          # 8x18
+        b = self._sprite(1, 0, 15, 24)          # 14x24 — muito maior
+        m = medida.medir_sprite(a, b, self.fundo)
+        self.assertEqual(m["veredito"], "reprovado")
+        self.assertGreater(m["escala_largura"], 1.2)
+
+    def test_proporcao_alterada(self):
+        a = self._sprite(2, 2, 10, 20)          # 8x18
+        b = self._sprite(2, 2, 14, 20)          # 12x18 — mais largo
+        m = medida.medir_sprite(a, b, self.fundo)
+        self.assertGreater(abs(m["proporcao"] - 1.0), 0.15)
+
+    def test_desvio_de_centro(self):
+        a = self._sprite(2, 2, 10, 20)
+        b = self._sprite(4, 2, 12, 20)          # +2 px no eixo x
+        m = medida.medir_sprite(a, b, self.fundo)
+        self.assertEqual(m["desvio_centro"][0], 2.0)
+
+    def test_folha_resume_pior_celula(self):
+        rect = [[0, 0, 16, 24]]
+        o = np.stack([self._sprite(2, 2, 10, 20)])
+        ok = np.stack([self._sprite(2, 2, 10, 20)])
+        mau = np.stack([self._sprite(1, 0, 15, 24)])
+        r = medida.medir_folha(o[0], ok[0], rect, self.fundo)
+        self.assertEqual(r["veredito_folha"], "ok")
+        r = medida.medir_folha(o[0], mau[0], rect, self.fundo)
+        self.assertEqual(r["veredito_folha"], "reprovado")
 
 
 if __name__ == "__main__":
