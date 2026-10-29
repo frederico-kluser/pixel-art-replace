@@ -6,25 +6,31 @@ Substitui o look de sprites/pixel art com IA — do upload à aprovação — se
 
 ## Como rodar (ver a interface)
 
-A interface é uma **app React** (`web/`, com Tailwind + shadcn + Motion) servida pelo backend Python.
-Copie os blocos **na íntegra** — funcionam a partir da raiz do projeto.
+**Um comando só** — instala o que falta, constrói a interface se preciso e abre o navegador:
 
-```bash
-# 1) dependências (uma vez): backend + comando global `par`
-pip install -r requirements.txt
-pip install -e .          # passa a poder correr `par` de QUALQUER pasta
-
-# 2) construir a interface (uma vez; ou após mudanças em web/)
-cd web && npm install && npm run build && cd ..
-
-# 3) subir o studio com a folha de exemplo
-par studio examples/folha-teste.png --out trabalho --mudanca "um look novo de samurai"
+```powershell
+.\iniciar.ps1        # Windows (PowerShell)
 ```
 
-Abra **<http://127.0.0.1:8770/>** no navegador: o fluxo guiado é
+```bash
+./iniciar.sh         # Linux / macOS
+```
+
+Abre **<http://127.0.0.1:8770/>** sozinho. **O upload das imagens é na própria página** (nada de imagens
+por terminal): escolha a sprite/tilesheet, a referência e escreva a mudança — o fluxo guiado é
 **1 Imagem → 2 Look → 3 Prova → 4 Lote → 5 Resultado**.
 
-Sem `pip install -e .`, o equivalente é `python -m par studio …` **a partir da raiz do projeto**.
+Para as próximas vezes, já instalado, o atalho é:
+
+```powershell
+par up               # sobe o studio e abre o navegador
+```
+
+**Modo desenvolvimento** (hot reload): mantenha o studio a correr e, noutro terminal:
+
+```bash
+cd web && npm run dev     # → http://127.0.0.1:5173/ (faz proxy da API para a porta 8770)
+```
 
 **Modo desenvolvimento** (hot reload): mantenha o backend a correr (passo 3) e, noutro terminal:
 
@@ -57,17 +63,15 @@ enviar UMA sprite ou uma TILESHEET
 - **Regresso à pixel art**: voto maioritário por bloco + snap à paleta original (as cores únicas da arte).
 - Estado persistido em `studio.json`; erros no formato `Erro: … — Solução: …`.
 
-## Uso também por linha de comandos
+## Uso também por linha de comandos (CLI documentado)
+
+A interface é o caminho principal; o CLI continua completo para automação/depuração:
 
 ```bash
-# análise rápida (e recorte, com --out)
-par analisar folha.png --out recortes/
-
-# expandir uma sprite para a resolução das ferramentas de geração
-par expandir sprite.png --out sprite-grande.png
-
-# studio completo (mesmo do passo 3 acima)
-par studio folha.png --out trabalho --mudanca "novo traje"
+par analisar folha.png --out recortes/    # análise rápida (sprite vs tilesheet) e recorte
+par expandir sprite.png --out grande.png  # expande para a resolução das ferramentas de geração
+par studio [folha.png] --out trabalho     # studio (imagem opcional: dá para subir na página)
+par up                                    # atalho: studio + navegador
 ```
 
 (`python -m par …` também funciona, a partir da raiz do projeto.)

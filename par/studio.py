@@ -52,10 +52,19 @@ def prompt_replace(estado: dict, mudanca: str, consideracoes: list[str], imagens
 
 # ── estado ────────────────────────────────────────────────────────────────────
 
+def novo_estado_vazio(out_dir: Path, model: str, mudanca: str) -> dict:
+    """Estado sem imagem: o upload é feito NA PÁGINA (nada de imagem por terminal)."""
+    return {"versao": 1, "entrada": None, "model": model, "mudanca": mudanca,
+            "analise": None, "fase": "inicio", "selecionadas": [],
+            "consideracoes": [], "historico": [], "aprovado": None,
+            "sprites": [], "resultados": [], "paleta": [], "fundo": "#FF00FF",
+            "largura_sprite": 1, "altura_sprite": 1}
+
+
 class Studio:
-    def __init__(self, entrada: Path, out_dir: Path, *, model: str = openrouter.MODELO_IMAGEM,
+    def __init__(self, entrada: Path | None, out_dir: Path, *, model: str = openrouter.MODELO_IMAGEM,
                  mudanca: str = "", sem_ia: bool = False):
-        self.entrada = Path(entrada)
+        self.entrada = Path(entrada) if entrada else None
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.model = model
@@ -65,6 +74,10 @@ class Studio:
         caminho = self.out_dir / "studio.json"
         if caminho.exists():
             self.estado = read_json(caminho)
+        elif self.entrada is None:
+            self.estado = novo_estado_vazio(self.out_dir, model, mudanca)
+            self.salvar()
+            self.sprites: list[np.ndarray] = []
         else:
             png = self.entrada.read_bytes()
             an = analise.analisar(png, com_ia=not sem_ia)
@@ -90,9 +103,9 @@ class Studio:
                 "altura_sprite": int(sprites[0].shape[0]) if sprites else 1,
             }
             self.salvar()
-        # reconstrói as sprites em memória a partir dos PNGs
+        # reconstrói as sprites em memória a partir dos PNGs (quando existem)
         self.sprites = [np.asarray(Image.open(self.out_dir / s["arquivo"]).convert("RGB"))
-                        for s in self.estado["sprites"]]
+                        for s in self.estado.get("sprites", [])]
 
     def reanalisar(self, png: bytes) -> dict:
         """(Re)analisa um upload novo e reinicia o fluxo mantendo o modelo/mudança."""
@@ -391,14 +404,24 @@ def fazer_handler(studio: Studio):
     return Handler
 
 
-def servir(entrada: Path, out_dir: Path, *, model: str = openrouter.MODELO_IMAGEM,
+def servir(entrada: Path | None, out_dir: Path, *, model: str = openrouter.MODELO_IMAGEM,
            mudanca: str = "", sem_ia: bool = False, port: int = 8770,
-           host: str = "127.0.0.1") -> None:
+           host: str = "127.0.0.1", abrir: bool = True) -> None:
+    """Sobe o studio. `entrada=None` = o upload é feito NA PÁGINA (nada de imagem por terminal).
+    `abrir=True` abre o navegador sozinho."""
     studio = Studio(entrada, out_dir, model=model, mudanca=mudanca, sem_ia=sem_ia)
     httpd = ThreadingHTTPServer((host, port), fazer_handler(studio))
-    print(f"pixel-art-replace → http://{host}:{port}/  (modelo de imagem: {studio.estado['model']})")
-    print(f"entrada: {studio.entrada.name} · análise: {studio.estado['analise']['tipo']} "
-          f"({studio.estado['analise']['celulas']} sprites) · Ctrl+C para sair")
+    url = f"http://{host}:{port}/"
+    print(f"pixel-art-replace → {url}  (modelo de imagem: {studio.estado['model']})")
+    an = studio.estado.get("analise")
+    if an:
+        nome = studio.entrada.name if studio.entrada else "upload na página"
+        print(f"entrada: {nome} · análise: {an['tipo']} ({an['celulas']} sprites) · Ctrl+C para sair")
+    else:
+        print("sem imagem ainda — faça o upload NA PÁGINA · Ctrl+C para sair")
+    if abrir:
+        import webbrowser
+        threading.Timer(1.0, webbrowser.open, args=[url]).start()
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

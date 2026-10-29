@@ -35,8 +35,8 @@ def cmd_expandir(a):
 
 
 def cmd_studio(a):
-    studio.servir(Path(a.imagem), Path(a.out), model=a.model, mudanca=a.mudanca or "",
-                  sem_ia=a.sem_ia, port=a.port)
+    studio.servir(Path(a.imagem) if a.imagem else None, Path(a.out), model=a.model, mudanca=a.mudanca or "",
+                  sem_ia=a.sem_ia, port=a.port, abrir=a.abrir)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -52,13 +52,21 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--out", required=True)
     s.add_argument("--alvo", type=int, default=imagem.ALVO, help="lado maior de referência (padrão 1024)")
     s.set_defaults(fn=cmd_expandir)
-    s = sub.add_parser("studio", help="abre o studio em localhost (análise → replace → aprovar → paralelo)")
-    s.add_argument("imagem", help="sprite ou tilesheet de entrada")
-    s.add_argument("--out", required=True, help="diretório de trabalho")
+    s = sub.add_parser("up", help="ATALHO: sobe o studio e abre o navegador (upload na página, nada no terminal)")
+    s.add_argument("--out", default="trabalho", help="diretório de trabalho (padrão: trabalho)")
     s.add_argument("--model", default=openrouter.MODELO_IMAGEM)
     s.add_argument("--mudanca", default="")
     s.add_argument("--sem-ia", action="store_true")
     s.add_argument("--port", type=int, default=8770)
+    s.set_defaults(fn=cmd_studio, imagem=None, abrir=True)
+    s = sub.add_parser("studio", help="abre o studio em localhost (análise → replace → aprovar → paralelo)")
+    s.add_argument("imagem", nargs="?", help="sprite ou tilesheet de entrada (opcional: dá para fazer upload na página)")
+    s.add_argument("--out", default="trabalho", help="diretório de trabalho (padrão: trabalho)")
+    s.add_argument("--model", default=openrouter.MODELO_IMAGEM)
+    s.add_argument("--mudanca", default="")
+    s.add_argument("--sem-ia", action="store_true")
+    s.add_argument("--port", type=int, default=8770)
+    s.add_argument("--abrir", action="store_true", help="abre o navegador sozinho")
     s.set_defaults(fn=cmd_studio)
     a = p.parse_args(argv)
     try:
